@@ -4,7 +4,7 @@
 import csv
 import io
 import os
-from flask import Flask, render_template_string, request, Response, Blueprint
+from flask import Flask, render_template_string, request, Response, Blueprint, redirect
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -317,6 +317,12 @@ def download():
 
 
 app.register_blueprint(bp, url_prefix="/csv-compare")
+
+
+@app.route("/")
+def root_redirect():
+    return redirect("/csv-compare/")
+
 
 
 if __name__ == "__main__":
