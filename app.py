@@ -4,10 +4,12 @@
 import csv
 import io
 import os
-from flask import Flask, render_template_string, request, Response
+from flask import Flask, render_template_string, request, Response, Blueprint
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
+
+bp = Blueprint("csv_compare", __name__)
 
 HTML = """
 <!DOCTYPE html>
@@ -69,7 +71,7 @@ HTML = """
 <body>
     <h1>CSV-jämförare</h1>
 
-    <form id="form" method="POST" enctype="multipart/form-data">
+    <form id="form" method="POST" enctype="multipart/form-data" action="{{ url_for('csv_compare.index') }}">
         <div class="drop-zone" id="dropZone">
             <p>Dra och släpp CSV-filer här, eller klicka för att välja</p>
             <input type="file" name="files" id="fileInput" multiple accept=".csv" style="display:none">
@@ -127,7 +129,7 @@ HTML = """
                 </tbody>
             </table>
         </div>
-        <a class="download-btn" href="/download" target="_blank">Ladda ner som CSV</a>
+        <a class="download-btn" href="{{ url_for('csv_compare.download') }}" target="_blank">Ladda ner som CSV</a>
         {% endif %}
     </div>
     {% endif %}
@@ -185,7 +187,7 @@ HTML = """
             storedFiles.forEach(f => fd.append('files', f));
             fd.set('action', 'upload');
 
-            fetch('/', { method: 'POST', body: fd })
+            fetch('{{ url_for("csv_compare.index") }}', { method: 'POST', body: fd })
                 .then(r => r.text())
                 .then(html => {
                     const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -231,7 +233,7 @@ def parse_csv(file_storage):
     return rows, list(reader.fieldnames) if reader.fieldnames else []
 
 
-@app.route("/", methods=["GET", "POST"])
+@bp.route("/", methods=["GET", "POST"])
 def index():
     columns = []
     selected_column = None
@@ -296,7 +298,7 @@ def index():
     return render_template_string(HTML, columns=columns, results=results, selected_column=selected_column)
 
 
-@app.route("/download")
+@bp.route("/download")
 def download():
     if not last_result.get("rows"):
         return "Inget resultat att ladda ner", 404
@@ -312,6 +314,9 @@ def download():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=gemensamma.csv"},
     )
+
+
+app.register_blueprint(bp, url_prefix="/csv-compare")
 
 
 if __name__ == "__main__":
