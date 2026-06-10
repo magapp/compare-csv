@@ -224,7 +224,11 @@ last_result = {}
 
 
 def parse_csv(file_storage):
-    text = file_storage.read().decode("utf-8-sig")
+    raw = file_storage.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
     # Detect delimiter
     first_line = text.split("\n", 1)[0]
     delimiter = ";" if ";" in first_line else ","
