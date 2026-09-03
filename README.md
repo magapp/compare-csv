@@ -1,42 +1,35 @@
-# CSV-jämförare
+# CrossMatch
 
-Webbapp och CLI-verktyg för att jämföra CSV-filer och hitta gemensamma värden baserat på en vald kolumn.
+Web app for finding matching rows across multiple Excel or CSV files.
 
-## Funktioner
+## Features
 
-- Dra-och-släpp av CSV-filer i webbgränssnittet
-- Automatisk detektering av delimiter (`;` eller `,`)
-- Jämförelse på valfri kolumn
-- Visar parvis överlapp mellan filer
-- Exportera gemensamma rader som CSV
-- CLI-version för terminalanvändning
+- Drag-and-drop Excel (`.xlsx`, `.xlsm`) and CSV files
+- Automatic column selection — no need to pick a key column manually
+- Datetime columns (e.g. export timestamps) are excluded automatically
+- Matches rows that appear in **at least two** of the uploaded files
+- Shows pairwise overlap between files
+- Download results as Excel or CSV
 
-## Kom igång
+## Getting started
 
-### Med Docker
+### With Docker
 
 ```bash
 docker compose up --build
 ```
 
-Appen finns sedan på [http://localhost:5002](http://localhost:5002).
+The app is available at [http://localhost:5002](http://localhost:5002).
 
-### Utan Docker
+### Without Docker
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-### CLI
-
-```bash
-python compare.py fil1.csv fil2.csv
-```
-
-Utan argument letar skriptet efter `*_utf8.csv`-filer i samma katalog.
-
-## Teknik
+## Tech
 
 - Python 3.12
 - Flask
+- openpyxl

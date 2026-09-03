@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Webapp för att jämföra CSV-filer och hitta gemensamma värden."""
+"""Webapp för att jämföra Excel- och CSV-filer och hitta gemensamma rader."""
 
+import collections
 import csv
+import datetime
 import io
 import os
+import re
+import openpyxl
 from flask import Flask, render_template_string, request, Response, Blueprint, redirect
+
+_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -17,7 +23,7 @@ HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CSV-jämförare</title>
+    <title>CrossMatch</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; padding: 2rem; }
@@ -38,16 +44,7 @@ HTML = """
             background: none; border: none; color: #6366f1; cursor: pointer;
             font-weight: bold; margin-left: .3rem;
         }
-        select, button[type=submit] {
-            font-size: 1rem; padding: .5rem 1rem; border-radius: 6px; border: 1px solid #ccc;
-        }
-        button[type=submit] {
-            background: #2563eb; color: #fff; border: none; cursor: pointer;
-            margin-left: .5rem;
-        }
-        button[type=submit]:hover { background: #1d4ed8; }
-        button[type=submit]:disabled { background: #93c5fd; cursor: not-allowed; }
-        .controls { margin: 1rem 0; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+        .loading { color: #2563eb; font-style: italic; margin: .5rem 0; display: none; }
         .results { margin-top: 2rem; }
         .results h2 { margin-bottom: .5rem; }
         .summary { background: #fff; padding: 1rem 1.5rem; border-radius: 8px; margin-bottom: 1rem; }
@@ -65,46 +62,43 @@ HTML = """
             text-decoration: none; font-size: .95rem;
         }
         .download-btn:hover { background: #15803d; }
+        .download-btn.excel { background: #1d6a96; margin-left: .5rem; }
+        .download-btn.excel:hover { background: #155a80; }
         .pair { display: inline-block; background: #fef3c7; padding: .2rem .6rem; border-radius: 4px; margin: .15rem; font-size: .85rem; }
+        .col-tag { display: inline-block; background: #dcfce7; color: #166534; padding: .15rem .5rem; border-radius: 4px; margin: .1rem; font-size: .8rem; }
     </style>
 </head>
 <body>
-    <h1>CSV-jämförare</h1>
+    <h1>CrossMatch</h1>
 
-    <form id="form" method="POST" enctype="multipart/form-data" action="{{ url_for('csv_compare.index') }}">
+    <form id="form" enctype="multipart/form-data">
         <div class="drop-zone" id="dropZone">
-            <p>Dra och släpp CSV-filer här, eller klicka för att välja</p>
-            <input type="file" name="files" id="fileInput" multiple accept=".csv" style="display:none">
+            <p>Dra och släpp Excel- eller CSV-filer här, eller klicka för att välja</p>
+            <input type="file" name="files" id="fileInput" multiple accept=".xlsx,.xlsm,.xls,.csv" style="display:none">
         </div>
         <div class="file-list" id="fileList"></div>
-
-        {% if columns %}
-        <div class="controls">
-            <label for="column">Jämför på kolumn:</label>
-            <select name="column" id="column">
-                {% for col in columns %}
-                <option value="{{ col }}" {{ 'selected' if col == selected_column }}>{{ col }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit" name="action" value="compare">Jämför</button>
-        </div>
-        {% endif %}
+        <div class="loading" id="loading">Jämför filer...</div>
     </form>
 
+    <div id="results">
     {% if results %}
     <div class="results">
         <div class="summary">
             <h2>Resultat</h2>
-            <p><strong>Kolumn:</strong> {{ selected_column }}</p>
-            <p><strong>Antal filer:</strong> {{ results.file_count }}</p>
+            <p><strong>Jämförda kolumner:</strong>
+                {% for col in results.shared_cols %}<span class="col-tag">{{ col }}</span>{% endfor %}
+            </p>
+            <p style="margin-top:.5rem"><strong>Antal filer:</strong> {{ results.file_count }}</p>
             {% for fname, count in results.file_stats %}
-            <p>&nbsp;&nbsp;{{ fname }}: {{ count }} unika värden</p>
+            <p>&nbsp;&nbsp;{{ fname }}: {{ count }} unika rader</p>
             {% endfor %}
-            <p style="margin-top:.5rem"><strong>Gemensamma värden (finns i alla filer):</strong> {{ results.common_count }}</p>
+            <p style="margin-top:.5rem"><strong>Gemensamma rader (finns i minst 2 filer):</strong> {{ results.common_count }}</p>
+            {% if results.pairwise %}
             <p style="margin-top:.5rem"><strong>Parvis överlapp:</strong></p>
             {% for pair, count in results.pairwise %}
             <span class="pair">{{ pair }}: {{ count }}</span>
             {% endfor %}
+            {% endif %}
         </div>
 
         {% if results.common_count > 0 %}
@@ -130,21 +124,18 @@ HTML = """
             </table>
         </div>
         <a class="download-btn" href="{{ url_for('csv_compare.download') }}" target="_blank">Ladda ner som CSV</a>
+        <a class="download-btn excel" href="{{ url_for('csv_compare.download_excel') }}" target="_blank">Ladda ner som Excel</a>
         {% endif %}
     </div>
     {% endif %}
+    </div>
 
     <script>
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
         const fileList = document.getElementById('fileList');
-        const form = document.getElementById('form');
+        const loading = document.getElementById('loading');
         let storedFiles = [];
-
-        // Restore files from previous upload if we have columns but no compare results
-        {% if columns and not results %}
-        // Auto-submit happens server-side, no need to restore
-        {% endif %}
 
         dropZone.addEventListener('click', () => fileInput.click());
         dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
@@ -163,57 +154,36 @@ HTML = """
                 }
             }
             renderList();
-            if (storedFiles.length >= 2) autoSubmit();
+            if (storedFiles.length >= 2) compare();
         }
 
         function removeFile(idx) {
             storedFiles.splice(idx, 1);
             renderList();
+            if (storedFiles.length >= 2) compare();
+            else document.getElementById('results').innerHTML = '';
         }
 
         function renderList() {
             fileList.innerHTML = storedFiles.map((f, i) =>
-                `<span>${f.name} <button onclick="removeFile(${i})">✕</button></span>`
+                `<span>${f.name} <button type="button" onclick="removeFile(${i})">&#x2715;</button></span>`
             ).join('');
         }
 
-        function autoSubmit() {
-            const dt = new DataTransfer();
-            storedFiles.forEach(f => dt.items.add(f));
-            fileInput.files = dt.files;
-            // Submit to get columns
-            const fd = new FormData(form);
-            fd.delete('files');
+        function compare() {
+            loading.style.display = 'block';
+            const fd = new FormData();
             storedFiles.forEach(f => fd.append('files', f));
-            fd.set('action', 'upload');
 
             fetch('{{ url_for("csv_compare.index") }}', { method: 'POST', body: fd })
                 .then(r => r.text())
                 .then(html => {
+                    loading.style.display = 'none';
                     const doc = new DOMParser().parseFromString(html, 'text/html');
-                    const newControls = doc.querySelector('.controls');
-                    const oldControls = document.querySelector('.controls');
-                    if (newControls) {
-                        if (oldControls) oldControls.replaceWith(newControls);
-                        else form.appendChild(newControls);
-                    }
-                    // Re-bind submit
-                    rebindForm();
+                    document.getElementById('results').innerHTML =
+                        doc.getElementById('results').innerHTML;
                 });
         }
-
-        function rebindForm() {
-            const btn = form.querySelector('button[type=submit]');
-            if (btn) {
-                btn.addEventListener('click', e => {
-                    // Make sure files are attached
-                    const dt = new DataTransfer();
-                    storedFiles.forEach(f => dt.items.add(f));
-                    fileInput.files = dt.files;
-                });
-            }
-        }
-        rebindForm();
     </script>
 </body>
 </html>
@@ -223,83 +193,141 @@ HTML = """
 last_result = {}
 
 
-def parse_csv(file_storage):
+def parse_file(file_storage):
+    """Return (rows, headers) where rows are dicts with raw Python values (preserving types)."""
+    filename = file_storage.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in (".xlsx", ".xlsm", ".xls"):
+        wb = openpyxl.load_workbook(file_storage, read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        headers = [str(c) if c is not None else "" for c in next(rows_iter, [])]
+        rows = [
+            {headers[i]: v for i, v in enumerate(row)}
+            for row in rows_iter
+            if any(v is not None for v in row)
+        ]
+        wb.close()
+        return rows, headers
+
+    # CSV fallback — all values are already strings
     raw = file_storage.read()
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
-    # Detect delimiter
     first_line = text.split("\n", 1)[0]
     delimiter = ";" if ";" in first_line else ","
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
-    rows = list(reader)
+    rows = [r for r in reader if any(v.strip() for v in r.values())]
     return rows, list(reader.fieldnames) if reader.fieldnames else []
+
+
+def cell_str(v):
+    """Convert a cell value to a comparable string."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime.datetime):
+        return v.isoformat()
+    return str(v).strip()
+
+
+def is_datetime_col(col, all_data):
+    """Return True if the column contains datetime values in any file.
+    Handles both Excel datetime objects and CSV datetime strings."""
+    for rows, _ in all_data.values():
+        for row in rows:
+            v = row.get(col)
+            if isinstance(v, datetime.datetime):
+                return True
+            if isinstance(v, str) and _DATETIME_RE.match(v):
+                return True
+    return False
+
+
+def has_cross_file_overlap(col, all_data):
+    """Return True if the column has at least one common non-empty value across ALL files.
+    Kept strict so that per-row unique IDs (like Subscriber ID) aren't used as key columns."""
+    value_sets = [
+        {cell_str(row.get(col)) for row in rows} - {""}
+        for rows, _ in all_data.values()
+    ]
+    return bool(set.intersection(*value_sets)) if value_sets else False
 
 
 @bp.route("/", methods=["GET", "POST"])
 def index():
-    columns = []
-    selected_column = None
     results = None
 
     if request.method == "POST":
         files = request.files.getlist("files")
         files = [f for f in files if f.filename]
 
-        if len(files) < 2:
-            return render_template_string(HTML, columns=[], results=None, selected_column=None)
+        if len(files) >= 2:
+            all_data = {}
+            all_header_sets = []
+            first_headers = None
+            for f in files:
+                rows, hdrs = parse_file(f)
+                all_data[f.filename] = (rows, hdrs)
+                all_header_sets.append(set(hdrs))
+                if first_headers is None:
+                    first_headers = hdrs
 
-        all_data = {}
-        headers = []
-        for f in files:
-            rows, hdrs = parse_csv(f)
-            all_data[f.filename] = rows
-            if not headers:
-                headers = hdrs
+            # Key columns: shared across all files, non-datetime,
+            # and must have at least one common value across files.
+            # This excludes per-row unique IDs (like Subscriber ID) that never overlap.
+            shared_set = set.intersection(*all_header_sets)
+            shared_cols = [
+                h for h in first_headers
+                if h in shared_set
+                and not is_datetime_col(h, all_data)
+                and has_cross_file_overlap(h, all_data)
+            ]
 
-        columns = headers
-        action = request.form.get("action", "upload")
+            def row_key(row):
+                return tuple(cell_str(row.get(c)) for c in shared_cols)
 
-        if action == "compare":
-            selected_column = request.form.get("column", headers[0])
-            sets_per_file = {}
-            for fname, rows in all_data.items():
-                values = {row.get(selected_column, "").strip() for row in rows}
-                values.discard("")
-                sets_per_file[fname] = values
+            keys_per_file = {}
+            for fname, (rows, _) in all_data.items():
+                keys_per_file[fname] = {row_key(r) for r in rows}
 
-            common = set.intersection(*sets_per_file.values()) if sets_per_file else set()
+            # Keys that appear in at least 2 files
+            key_file_count = collections.Counter()
+            for keys in keys_per_file.values():
+                key_file_count.update(keys)
+            common_keys = {k for k, n in key_file_count.items() if n >= 2}
 
-            # Pairwise
-            filenames = list(sets_per_file.keys())
+            # Pairwise overlap
+            filenames = list(keys_per_file.keys())
             pairwise = []
             for i in range(len(filenames)):
                 for j in range(i + 1, len(filenames)):
-                    overlap = sets_per_file[filenames[i]] & sets_per_file[filenames[j]]
+                    overlap = keys_per_file[filenames[i]] & keys_per_file[filenames[j]]
                     pairwise.append((f"{filenames[i]} & {filenames[j]}", len(overlap)))
 
-            # Build result rows
+            # Result rows: all columns from first file, values converted to strings
             result_rows = []
-            for fname, rows in all_data.items():
+            for fname, (rows, _) in all_data.items():
                 for row in rows:
-                    if row.get(selected_column, "").strip() in common:
-                        result_rows.append([fname] + [row.get(h, "") for h in headers])
+                    if row_key(row) in common_keys:
+                        result_rows.append([fname] + [cell_str(row.get(h)) for h in first_headers])
 
             results = {
                 "file_count": len(all_data),
-                "file_stats": [(fn, len(s)) for fn, s in sets_per_file.items()],
-                "common_count": len(common),
+                "file_stats": [(fn, len(keys_per_file[fn])) for fn in filenames],
+                "common_count": len(common_keys),
                 "pairwise": pairwise,
-                "headers": headers,
+                "shared_cols": shared_cols,
+                "headers": first_headers,
                 "rows": result_rows,
             }
 
-            # Store for download
-            last_result["headers"] = headers
+            last_result["headers"] = first_headers
             last_result["rows"] = result_rows
 
-    return render_template_string(HTML, columns=columns, results=results, selected_column=selected_column)
+    return render_template_string(HTML, results=results)
 
 
 @bp.route("/download")
@@ -320,13 +348,35 @@ def download():
     )
 
 
+@bp.route("/download-excel")
+def download_excel():
+    if not last_result.get("rows"):
+        return "Inget resultat att ladda ner", 404
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Gemensamma värden"
+    ws.append(["Källa"] + last_result["headers"])
+    for row in last_result["rows"]:
+        ws.append(row)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return Response(
+        output.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=gemensamma.xlsx"},
+    )
+
+
 app.register_blueprint(bp, url_prefix="/csv-compare")
 
 
 @app.route("/")
 def root_redirect():
     return redirect("/csv-compare/")
-
 
 
 if __name__ == "__main__":
