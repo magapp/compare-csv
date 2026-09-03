@@ -15,7 +15,7 @@ _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
 
-bp = Blueprint("csv_compare", __name__)
+bp = Blueprint("crossmatch", __name__)
 
 HTML = """
 <!DOCTYPE html>
@@ -123,8 +123,8 @@ HTML = """
                 </tbody>
             </table>
         </div>
-        <a class="download-btn" href="{{ url_for('csv_compare.download') }}" target="_blank">Ladda ner som CSV</a>
-        <a class="download-btn excel" href="{{ url_for('csv_compare.download_excel') }}" target="_blank">Ladda ner som Excel</a>
+        <a class="download-btn" href="{{ url_for('crossmatch.download') }}" target="_blank">Ladda ner som CSV</a>
+        <a class="download-btn excel" href="{{ url_for('crossmatch.download_excel') }}" target="_blank">Ladda ner som Excel</a>
         {% endif %}
     </div>
     {% endif %}
@@ -175,7 +175,7 @@ HTML = """
             const fd = new FormData();
             storedFiles.forEach(f => fd.append('files', f));
 
-            fetch('{{ url_for("csv_compare.index") }}', { method: 'POST', body: fd })
+            fetch('{{ url_for("crossmatch.index") }}', { method: 'POST', body: fd })
                 .then(r => r.text())
                 .then(html => {
                     loading.style.display = 'none';
@@ -371,12 +371,12 @@ def download_excel():
     )
 
 
-app.register_blueprint(bp, url_prefix="/csv-compare")
+app.register_blueprint(bp, url_prefix="/crossmatch")
 
 
 @app.route("/")
 def root_redirect():
-    return redirect("/csv-compare/")
+    return redirect("/crossmatch/")
 
 
 if __name__ == "__main__":
